@@ -46,14 +46,48 @@
 ## Understanding the Display
 
 ### Table Columns
-- **Item**: Item name
+- **Item**: Item name  
 - **Current Price**: Latest price from API
-- **Average**: Mean price from all collected data
+- **Average**: Mean price from YOUR collected data (this session)
 - **Std Dev**: Standard deviation in GP (absolute price volatility)
 - **Volatility %**: Std Dev as percentage of average (relative volatility)
 - **Deviation (σ)**: How many standard deviations from average
-- **Change %**: Percentage change from average
+- **Change %**: Percentage change from YOUR session average
 - **Status**: "Collecting data...", "Normal", or "⚠️ ALERT!"
+
+### Understanding "Average" and "Change %"
+
+**Important:** These values are calculated from the prices YOU'VE collected while running the app, NOT from historical API data.
+
+**Why this is useful:**
+- Shows how items perform during YOUR active monitoring session
+- Detects deviations from YOUR observed baseline  
+- Perfect for active trading/flipping sessions
+- Not misleading - it's clear these are YOUR collected data points
+
+**For long-term historical comparison:**
+- **Double-click any item** to see full historical price charts
+- Choose from: 30 hours, 15 days, 90 days, or 1 year
+- Uses official OSRS Wiki historical timeseries data
+
+### Price History Charts (Double-Click Feature)
+
+**Double-click any item in the table** to open an interactive price chart!
+
+**Time Period Options:**
+- **30 Hours** (5-min intervals) - Intraday trading patterns
+- **15 Days** (1-hour intervals) - Weekly trends
+- **90 Days** (6-hour intervals) - Quarterly view
+- **1 Year** (24-hour intervals) - Long-term analysis
+
+**Chart Shows:**
+- Green line: High (buy) prices over time
+- Red line: Low (sell) prices over time
+- Yellow fill: Spread between high/low
+- Dashed lines: Period averages
+- Stats box: Average prices, spread, current price
+
+This historical data comes directly from the OSRS Wiki API and shows REAL trading activity (not your local data).
 
 ### Understanding Volatility %
 
@@ -169,7 +203,12 @@ Right-click on any item → "Remove from Watchlist"
 
 1. **Let it collect data**: The app needs at least 2 price points to calculate statistics. The more data it has, the better the analysis.
 
-2. **Adjust threshold**: 
+2. **Use the price charts**: Double-click any item to see historical trends. This helps you:
+   - Identify if current prices are historically high or low
+   - Spot seasonal patterns or trends
+   - Decide if a deviation is a real opportunity or normal fluctuation
+
+3. **Adjust threshold**: 
    - Start with 1.0
    - If too many alerts: increase to 1.5 or 2.0
    - If missing opportunities: decrease to 0.5

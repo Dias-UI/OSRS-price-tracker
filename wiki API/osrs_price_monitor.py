@@ -7,13 +7,17 @@ import requests
 import json
 import time
 import threading
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 import statistics
 from typing import Dict, List, Optional
 import customtkinter as ctk
 from tkinter import messagebox
 import tkinter.ttk as ttk
+import matplotlib.pyplot as plt
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+from matplotlib.figure import Figure
+import matplotlib.dates as mdates
 
 try:
     from winotify import Notification, audio
@@ -41,6 +45,34 @@ class PriceMonitor:
             print(f"Error fetching prices: {e}")
             return None
     
+    def fetch_timeseries(self, item_id: int, timestep: str = '6h') -> Optional[List[Dict]]:
+        """
+        Fetch historical price data for an item
+        
+        Args:
+            item_id: Item ID to fetch data for
+            timestep: Time interval - '5m', '1h', '6h', or '24h'
+                     5m = ~30 hours of data
+                     1h = ~15 days of data  
+                     6h = ~90 days of data
+                     24h = ~1 year of data (365 data points max)
+        
+        Returns:
+            List of price data points with timestamps
+        """
+        try:
+            url = f"https://prices.runescape.wiki/api/v1/osrs/timeseries"
+            params = {
+                'timestep': timestep,
+                'id': item_id
+            }
+            response = requests.get(url, headers=self.headers, params=params, timeout=15)
+            response.raise_for_status()
+            return response.json()['data']
+        except Exception as e:
+            print(f"Error fetching timeseries for item {item_id}: {e}")
+            return None
+    
     def update_price_history(self, item_id: int, price: int):
         """Add price to historical data"""
         if item_id not in self.price_history:
@@ -48,7 +80,18 @@ class PriceMonitor:
         self.price_history[item_id].append(price)
     
     def calculate_statistics(self, item_id: int) -> Optional[Dict]:
-        """Calculate mean, std dev, and current deviation"""
+        """
+        Calculate mean, std dev, and current deviation
+        
+        NOTE: Average and Change % are calculated from YOUR LOCAL price history
+        (prices collected while the app is running). This is intentional because:
+        1. Shows how the item is performing in YOUR monitoring session
+        2. Detects deviations from YOUR observed baseline
+        3. Not misleading - clearly based on your data collection
+        
+        For long-term historical comparison, use the chart (double-click item)
+        which shows API's full historical timeseries data.
+        """
         if item_id not in self.price_history or len(self.price_history[item_id]) < 2:
             return None
         
@@ -578,6 +621,9 @@ class OSRSPriceMonitorApp:
         self.tree.pack(side="left", fill="both", expand=True)
         scrollbar.pack(side="right", fill="y")
         
+        # Double-click to show chart
+        self.tree.bind("<Double-Button-1>", self.show_price_chart)
+        
         # Right-click menu for table
         self.tree.bind("<Button-3>", self.show_context_menu)
         
@@ -661,6 +707,173 @@ class OSRSPriceMonitorApp:
         for item_id in self.watchlist.watchlist:
             item_name = self.item_db.get_name(item_id)
             self.tree.insert('', 'end', values=(item_name, '-', '-', '-', '-', '-', '-', 'No data'), tags=(str(item_id),))
+    
+    def show_price_chart(self, event):
+        """Show price history chart for selected item"""
+        selection = self.tree.selection()
+        if not selection:
+            return
+        
+        # Get item ID from tags
+        tags = self.tree.item(selection[0])['tags']
+        if not tags:
+            return
+        
+        item_id = int(tags[0])
+        item_name = self.item_db.get_name(item_id)
+        
+        # Create chart window
+        chart_window = ctk.CTkToplevel(self.root)
+        chart_window.title(f"Price History: {item_name}")
+        chart_window.geometry("900x650")
+        
+        # Time period selection frame
+        period_frame = ctk.CTkFrame(chart_window)
+        period_frame.pack(fill="x", padx=10, pady=10)
+        
+        ctk.CTkLabel(period_frame, text="Time Period:", font=ctk.CTkFont(size=13)).pack(side="left", padx=5)
+        
+        # Variable to track selected period
+        period_var = ctk.StringVar(value="90d")
+        
+        # Period buttons
+        periods = [
+            ("30 Hours", "5m"),
+            ("15 Days", "1h"),
+            ("90 Days", "6h"),
+            ("1 Year", "24h")
+        ]
+        
+        # Loading label
+        loading_label = ctk.CTkLabel(period_frame, text="", font=ctk.CTkFont(size=12))
+        loading_label.pack(side="right", padx=10)
+        
+        # Chart frame
+        chart_frame = ctk.CTkFrame(chart_window)
+        chart_frame.pack(fill="both", expand=True, padx=10, pady=5)
+        
+        def load_chart(timestep: str, period_name: str):
+            """Load and display chart for given timestep"""
+            period_var.set(timestep)
+            loading_label.configure(text="Loading...")
+            chart_window.update()
+            
+            # Clear previous chart
+            for widget in chart_frame.winfo_children():
+                widget.destroy()
+            
+            # Fetch data
+            data = self.monitor.fetch_timeseries(item_id, timestep)
+            
+            if not data or len(data) == 0:
+                loading_label.configure(text="No data available")
+                ctk.CTkLabel(
+                    chart_frame,
+                    text=f"No price history available for {item_name}",
+                    font=ctk.CTkFont(size=14)
+                ).pack(expand=True)
+                return
+            
+            loading_label.configure(text="")
+            
+            # Create matplotlib figure
+            fig = Figure(figsize=(8, 5), dpi=100)
+            fig.patch.set_facecolor('#2b2b2b')
+            ax = fig.add_subplot(111)
+            ax.set_facecolor('#1f1f1f')
+            
+            # Extract data
+            timestamps = [datetime.fromtimestamp(d['timestamp']) for d in data]
+            high_prices = [d.get('avgHighPrice') for d in data]
+            low_prices = [d.get('avgLowPrice') for d in data]
+            
+            # Filter out None values
+            valid_data = [(t, h, l) for t, h, l in zip(timestamps, high_prices, low_prices) 
+                         if h is not None and l is not None]
+            
+            if not valid_data:
+                loading_label.configure(text="No valid price data")
+                return
+            
+            timestamps, high_prices, low_prices = zip(*valid_data)
+            
+            # Plot high and low prices
+            ax.plot(timestamps, high_prices, label='High Price', color='#4CAF50', linewidth=2)
+            ax.plot(timestamps, low_prices, label='Low Price', color='#FF5722', linewidth=2)
+            
+            # Fill between
+            ax.fill_between(timestamps, high_prices, low_prices, alpha=0.2, color='#FFC107')
+            
+            # Calculate and show average
+            avg_high = sum(high_prices) / len(high_prices)
+            avg_low = sum(low_prices) / len(low_prices)
+            ax.axhline(y=avg_high, color='#4CAF50', linestyle='--', alpha=0.5, linewidth=1)
+            ax.axhline(y=avg_low, color='#FF5722', linestyle='--', alpha=0.5, linewidth=1)
+            
+            # Formatting
+            ax.set_xlabel('Date/Time', color='white', fontsize=11)
+            ax.set_ylabel('Price (GP)', color='white', fontsize=11)
+            ax.set_title(f'{item_name} - Price History ({period_name})', 
+                        color='white', fontsize=13, fontweight='bold', pad=15)
+            
+            # Format x-axis dates
+            if timestep == '5m':
+                ax.xaxis.set_major_formatter(mdates.DateFormatter('%m/%d %H:%M'))
+            elif timestep == '1h':
+                ax.xaxis.set_major_formatter(mdates.DateFormatter('%m/%d'))
+            else:
+                ax.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m-%d'))
+            
+            fig.autofmt_xdate()
+            
+            # Style
+            ax.tick_params(colors='white', labelsize=9)
+            ax.spines['bottom'].set_color('white')
+            ax.spines['left'].set_color('white')
+            ax.spines['top'].set_visible(False)
+            ax.spines['right'].set_visible(False)
+            ax.grid(True, alpha=0.2, color='white')
+            
+            # Legend
+            legend = ax.legend(loc='upper left', facecolor='#2b2b2b', edgecolor='white')
+            for text in legend.get_texts():
+                text.set_color('white')
+            
+            # Add stats text
+            stats_text = (
+                f"Avg High: {avg_high:,.0f} GP\n"
+                f"Avg Low: {avg_low:,.0f} GP\n"
+                f"Spread: {avg_high - avg_low:,.0f} GP ({((avg_high - avg_low) / avg_high * 100):.1f}%)\n"
+                f"Current: {high_prices[-1]:,.0f} GP"
+            )
+            ax.text(0.98, 0.98, stats_text,
+                   transform=ax.transAxes,
+                   verticalalignment='top',
+                   horizontalalignment='right',
+                   bbox=dict(boxstyle='round', facecolor='#2b2b2b', alpha=0.8, edgecolor='white'),
+                   fontsize=9,
+                   color='white')
+            
+            fig.tight_layout()
+            
+            # Embed in tkinter
+            canvas = FigureCanvasTkAgg(fig, master=chart_frame)
+            canvas.draw()
+            canvas.get_tk_widget().pack(fill="both", expand=True)
+        
+        # Create period buttons
+        for period_name, timestep in periods:
+            btn = ctk.CTkButton(
+                period_frame,
+                text=period_name,
+                command=lambda ts=timestep, pn=period_name: load_chart(ts, pn),
+                width=80,
+                height=30
+            )
+            btn.pack(side="left", padx=2)
+        
+        # Load default view (90 days)
+        chart_window.after(100, lambda: load_chart("6h", "90 Days"))
     
     def show_context_menu(self, event):
         """Show context menu for table"""
