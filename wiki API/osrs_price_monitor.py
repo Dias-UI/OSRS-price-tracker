@@ -382,6 +382,51 @@ class WatchlistManager:
         return False
 
 
+class PortfolioManager:
+    """Manages the user's portfolio of held items"""
+    
+    def __init__(self, filename="portfolio.json"):
+        self.filename = filename
+        self.portfolio: Dict[str, Dict] = {}
+        self.load()
+    
+    def load(self):
+        """Load portfolio from file"""
+        path = Path(self.filename)
+        if path.exists():
+            try:
+                with open(path, 'r') as f:
+                    self.portfolio = json.load(f)
+            except Exception as e:
+                print(f"Error loading portfolio: {e}")
+                self.portfolio = {}
+    
+    def save(self):
+        """Save portfolio to file"""
+        with open(self.filename, 'w') as f:
+            json.dump(self.portfolio, f)
+    
+    def add_item(self, item_id: int, quantity: int, buy_price: int) -> bool:
+        """Add or update item in portfolio"""
+        item_id_str = str(item_id)
+        self.portfolio[item_id_str] = {
+            'quantity': quantity,
+            'buy_price': buy_price,
+            'added_at': datetime.now().isoformat()
+        }
+        self.save()
+        return True
+    
+    def remove_item(self, item_id: int) -> bool:
+        """Remove item from portfolio"""
+        item_id_str = str(item_id)
+        if item_id_str in self.portfolio:
+            del self.portfolio[item_id_str]
+            self.save()
+            return True
+        return False
+
+
 class PriceHistory:
     """Manages persistent price history"""
     
@@ -439,7 +484,11 @@ class OSRSPriceMonitorApp:
         self.monitor = PriceMonitor()
         self.item_db = ItemDatabase()
         self.watchlist = WatchlistManager()
+        self.portfolio = PortfolioManager()
         self.price_history = PriceHistory()
+        
+        # View state
+        self.current_view = "watchlist"  # "watchlist" or "portfolio"
         
         # Settings
         self.threshold = 1.0  # Standard deviations
@@ -450,6 +499,7 @@ class OSRSPriceMonitorApp:
         # Sort tracking
         self.sort_column_name = None
         self.sort_reverse = False
+        self.last_price_data = {}
         
         # Create GUI
         self.root = ctk.CTk()
@@ -458,121 +508,155 @@ class OSRSPriceMonitorApp:
         
         self.setup_ui()
         self.load_settings()
-        self.refresh_watchlist()
         
         # Load historical data
         self.load_historical_data()
+        
+        # Initial data fetch to populate table
+        self.root.after(100, self.check_prices_now)
     
     def setup_ui(self):
         """Create the user interface"""
         # Main container
-        main_frame = ctk.CTkFrame(self.root)
-        main_frame.pack(fill="both", expand=True, padx=10, pady=10)
+        main_frame = ctk.CTkFrame(self.root, fg_color="transparent")
+        main_frame.pack(fill="both", expand=True, padx=20, pady=20)
         
-        # Title
+        # Header with Title and Status
+        header_frame = ctk.CTkFrame(main_frame, fg_color="transparent")
+        header_frame.pack(fill="x", pady=(0, 20))
+        
         title = ctk.CTkLabel(
-            main_frame,
+            header_frame,
             text="OSRS Price Monitor",
-            font=ctk.CTkFont(size=24, weight="bold")
+            font=ctk.CTkFont(family="Segoe UI", size=20, weight="bold")
         )
-        title.pack(pady=10)
+        title.pack(side="left")
         
         # Control Panel
-        control_frame = ctk.CTkFrame(main_frame)
-        control_frame.pack(fill="x", padx=10, pady=5)
+        control_frame = ctk.CTkFrame(main_frame, corner_radius=15)
+        control_frame.pack(fill="x", padx=0, pady=(0, 15))
         
         # Settings
-        settings_frame = ctk.CTkFrame(control_frame)
-        settings_frame.pack(side="left", padx=5)
+        settings_frame = ctk.CTkFrame(control_frame, fg_color="transparent")
+        settings_frame.pack(side="left", padx=15, pady=10)
         
-        ctk.CTkLabel(settings_frame, text="Threshold (σ):").pack(side="left", padx=5)
-        self.threshold_entry = ctk.CTkEntry(settings_frame, width=80)
+        ctk.CTkLabel(settings_frame, text="Threshold (σ):", font=ctk.CTkFont(family="Segoe UI", size=12)).pack(side="left", padx=5)
+        self.threshold_entry = ctk.CTkEntry(settings_frame, width=60, height=30, corner_radius=8)
         self.threshold_entry.insert(0, str(self.threshold))
         self.threshold_entry.pack(side="left", padx=5)
         
-        ctk.CTkLabel(settings_frame, text="Interval (min):").pack(side="left", padx=5)
-        self.interval_entry = ctk.CTkEntry(settings_frame, width=80)
+        ctk.CTkLabel(settings_frame, text="Interval (min):", font=ctk.CTkFont(family="Segoe UI", size=12)).pack(side="left", padx=5)
+        self.interval_entry = ctk.CTkEntry(settings_frame, width=60, height=30, corner_radius=8)
         self.interval_entry.insert(0, str(self.update_interval // 60))
         self.interval_entry.pack(side="left", padx=5)
         
         self.save_settings_btn = ctk.CTkButton(
             settings_frame,
-            text="Save Settings",
+            text="Save",
             command=self.save_settings,
-            width=100
+            width=60,
+            height=30,
+            corner_radius=8,
+            fg_color="#3b3b3b",
+            hover_color="#4b4b4b"
         )
-        self.save_settings_btn.pack(side="left", padx=5)
+        self.save_settings_btn.pack(side="left", padx=10)
         
         # Monitoring controls
-        monitor_frame = ctk.CTkFrame(control_frame)
-        monitor_frame.pack(side="right", padx=5)
+        monitor_frame = ctk.CTkFrame(control_frame, fg_color="transparent")
+        monitor_frame.pack(side="right", padx=15, pady=10)
         
         self.start_btn = ctk.CTkButton(
             monitor_frame,
-            text="Start Monitoring",
+            text="Start",
             command=self.start_monitoring,
-            width=120,
-            fg_color="green"
+            width=90,
+            height=32,
+            corner_radius=8,
+            fg_color="#2d5a27",
+            hover_color="#3d7a35",
+            font=ctk.CTkFont(family="Segoe UI", size=12, weight="bold")
         )
         self.start_btn.pack(side="left", padx=5)
         
         self.stop_btn = ctk.CTkButton(
             monitor_frame,
-            text="Stop Monitoring",
+            text="Stop",
             command=self.stop_monitoring,
-            width=120,
-            fg_color="red",
-            state="disabled"
+            width=90,
+            height=32,
+            corner_radius=8,
+            fg_color="#8a2b2b",
+            hover_color="#ab3b3b",
+            state="disabled",
+            font=ctk.CTkFont(family="Segoe UI", size=12, weight="bold")
         )
         self.stop_btn.pack(side="left", padx=5)
         
         self.check_now_btn = ctk.CTkButton(
             monitor_frame,
-            text="Check Now",
+            text="Refresh Now",
             command=self.check_prices_now,
-            width=100
+            width=110,
+            height=32,
+            corner_radius=8,
+            fg_color="#1f538d",
+            hover_color="#2666ae",
+            font=ctk.CTkFont(family="Segoe UI", size=12, weight="bold")
         )
         self.check_now_btn.pack(side="left", padx=5)
         
         # Add Item Section
-        add_frame = ctk.CTkFrame(main_frame)
-        add_frame.pack(fill="x", padx=10, pady=5)
+        add_frame = ctk.CTkFrame(main_frame, fg_color="transparent")
+        add_frame.pack(fill="x", padx=0, pady=(0, 15))
         
-        ctk.CTkLabel(add_frame, text="Add Item:", font=ctk.CTkFont(size=13)).pack(side="left", padx=5)
+        search_container = ctk.CTkFrame(add_frame, corner_radius=15)
+        search_container.pack(side="left", fill="x", expand=True)
+        
+        ctk.CTkLabel(search_container, text="🔍", font=ctk.CTkFont(size=16)).pack(side="left", padx=(15, 5))
         
         self.search_entry = ctk.CTkEntry(
-            add_frame, 
-            width=350, 
-            height=35,
-            placeholder_text="Search for items...",
-            font=ctk.CTkFont(size=13)
+            search_container,
+            width=400,
+            height=40,
+            placeholder_text="Search for items to track...",
+            font=ctk.CTkFont(family="Segoe UI", size=14),
+            border_width=0,
+            fg_color="transparent"
         )
-        self.search_entry.pack(side="left", padx=5)
+        self.search_entry.pack(side="left", fill="x", expand=True, padx=(0, 10))
         self.search_entry.bind('<KeyRelease>', self.on_search)
         
-        self.add_btn = ctk.CTkButton(
+        self.view_toggle_btn = ctk.CTkButton(
             add_frame,
-            text="Add to Watchlist",
-            command=self.add_selected_item,
-            width=140,
-            height=35,
-            font=ctk.CTkFont(size=13)
+            text="Portfolio View",
+            command=self.toggle_view,
+            width=150,
+            height=40,
+            corner_radius=12,
+            font=ctk.CTkFont(family="Segoe UI", size=13, weight="bold"),
+            fg_color="#3b3b3b",
+            hover_color="#4b4b4b"
         )
-        self.add_btn.pack(side="left", padx=5)
+        self.view_toggle_btn.pack(side="right", padx=(15, 0))
         
-        # Search Results
-        self.search_frame = ctk.CTkScrollableFrame(add_frame, height=150)
+        # Search Results (Floating-like effect)
+        self.search_frame = ctk.CTkScrollableFrame(self.root, height=200, corner_radius=12, fg_color="#2b2b2b", border_width=1, border_color="#3b3b3b")
         self.search_results = []
         
         # Watchlist Table
-        table_frame = ctk.CTkFrame(main_frame)
-        table_frame.pack(fill="both", expand=True, padx=10, pady=5)
+        table_frame = ctk.CTkFrame(main_frame, corner_radius=15)
+        table_frame.pack(fill="both", expand=True, padx=0, pady=0)
         
-        ctk.CTkLabel(
-            table_frame,
+        table_header = ctk.CTkFrame(table_frame, fg_color="transparent")
+        table_header.pack(fill="x", padx=20, pady=(15, 10))
+        
+        self.table_title = ctk.CTkLabel(
+            table_header,
             text="Monitored Items",
-            font=ctk.CTkFont(size=16, weight="bold")
-        ).pack(pady=5)
+            font=ctk.CTkFont(family="Segoe UI", size=18, weight="bold")
+        )
+        self.table_title.pack(side="left")
         
         # Create custom style for larger fonts
         style = ttk.Style()
@@ -584,16 +668,24 @@ class OSRSPriceMonitorApp:
                        foreground="white",
                        rowheight=35,
                        fieldbackground="#2b2b2b",
-                       font=('Arial', 13))  # Increased from 11 to 13
+                       borderwidth=0,
+                       font=('Segoe UI', 11))
         style.configure("Treeview.Heading",
-                       font=('Arial', 14, 'bold'),  # Increased from 12 to 14
-                       background="#1f1f1f",
-                       foreground="white")
-        style.map('Treeview', background=[('selected', '#4a6ea8')])
+                       font=('Segoe UI', 12, 'bold'),
+                       background="#333333",
+                       foreground="white",
+                       relief="flat")
+        style.map('Treeview',
+                 background=[('selected', '#1f538d')],
+                 foreground=[('selected', 'white')])
+        
+        # Container for tree and scrollbar
+        tree_container = ctk.CTkFrame(table_frame, fg_color="transparent")
+        tree_container.pack(fill="both", expand=True, padx=10, pady=(0, 10))
         
         # Create Treeview for table
         columns = ('Item', 'Current Price', 'Average', 'Std Dev', 'Volatility %', 'Deviation (σ)', 'Change %', 'Status')
-        self.tree = ttk.Treeview(table_frame, columns=columns, show='headings', height=15)
+        self.tree = ttk.Treeview(tree_container, columns=columns, show='headings', height=15)
         
         # Define headings with better widths
         column_widths = {
@@ -615,11 +707,15 @@ class OSRSPriceMonitorApp:
                 self.tree.column(col, anchor='center')
         
         # Add scrollbar
-        scrollbar = ttk.Scrollbar(table_frame, orient="vertical", command=self.tree.yview)
-        self.tree.configure(yscrollcommand=scrollbar.set)
+        self.scrollbar = ctk.CTkScrollbar(tree_container, orientation="vertical", command=self.tree.yview)
+        self.tree.configure(yscrollcommand=self.scrollbar.set)
         
-        self.tree.pack(side="left", fill="both", expand=True)
-        scrollbar.pack(side="right", fill="y")
+        # Use grid for better layout stability within the container
+        self.tree.grid(row=0, column=0, sticky="nsew")
+        self.scrollbar.grid(row=0, column=1, sticky="ns")
+        
+        tree_container.grid_columnconfigure(0, weight=1)
+        tree_container.grid_rowconfigure(0, weight=1)
         
         # Double-click to show chart
         self.tree.bind("<Double-Button-1>", self.show_price_chart)
@@ -630,18 +726,77 @@ class OSRSPriceMonitorApp:
         # Status Bar
         self.status_var = ctk.StringVar(value="Ready")
         status_bar = ctk.CTkLabel(
-            main_frame,
+            header_frame,
             textvariable=self.status_var,
-            anchor="w"
+            font=ctk.CTkFont(family="Segoe UI", size=12),
+            text_color="#888888"
         )
-        status_bar.pack(fill="x", padx=10, pady=5)
+        status_bar.pack(side="right", pady=(10, 0))
     
+    def toggle_view(self):
+        """Toggle between watchlist and portfolio views"""
+        if self.current_view == "watchlist":
+            self.current_view = "portfolio"
+            self.view_toggle_btn.configure(text="Watchlist View")
+            self.table_title.configure(text="My Portfolio")
+            self.setup_portfolio_columns()
+            self.refresh_portfolio()
+        else:
+            self.current_view = "watchlist"
+            self.view_toggle_btn.configure(text="Portfolio View")
+            self.table_title.configure(text="Monitored Items")
+            self.setup_watchlist_columns()
+            self.refresh_watchlist()
+        
+        # Reset sort tracking when switching views
+        self.sort_column_name = None
+        self.sort_reverse = False
+
+    def setup_watchlist_columns(self):
+        """Configure columns for watchlist view"""
+        columns = ('Item', 'Current Price', 'Average', 'Std Dev', 'Volatility %', 'Deviation (σ)', 'Change %', 'Status')
+        column_widths = {
+            'Item': 180,
+            'Current Price': 110,
+            'Average': 110,
+            'Std Dev': 90,
+            'Volatility %': 95,
+            'Deviation (σ)': 110,
+            'Change %': 90,
+            'Status': 120
+        }
+        self.tree.configure(columns=columns)
+        for col in columns:
+            self.tree.heading(col, text=col, command=lambda c=col: self.sort_column(c))
+            self.tree.column(col, width=column_widths[col])
+            if col != 'Item':
+                self.tree.column(col, anchor='center')
+
+    def setup_portfolio_columns(self):
+        """Configure columns for portfolio view"""
+        columns = ('Item', 'Quantity', 'Buy Price', 'Current Price', 'Total Value', 'Profit/Loss', '% Change')
+        column_widths = {
+            'Item': 180,
+            'Quantity': 100,
+            'Buy Price': 110,
+            'Current Price': 110,
+            'Total Value': 130,
+            'Profit/Loss': 130,
+            '% Change': 100
+        }
+        self.tree.configure(columns=columns)
+        for col in columns:
+            self.tree.heading(col, text=col, command=lambda c=col: self.sort_column(c))
+            self.tree.column(col, width=column_widths[col])
+            if col != 'Item':
+                self.tree.column(col, anchor='center')
+
     def on_search(self, event):
         """Handle search input"""
         query = self.search_entry.get()
         if len(query) < 2:
             if hasattr(self, 'search_frame') and self.search_frame.winfo_manager():
-                self.search_frame.pack_forget()
+                self.search_frame.place_forget()
             return
         
         results = self.item_db.search_items(query)
@@ -655,36 +810,44 @@ class OSRSPriceMonitorApp:
         
         if not results:
             ctk.CTkLabel(
-                self.search_frame, 
+                self.search_frame,
                 text="No items found",
-                font=ctk.CTkFont(size=12)
-            ).pack()
-            self.search_frame.pack(fill="x", padx=5, pady=5)
+                font=ctk.CTkFont(family="Segoe UI", size=12)
+            ).pack(pady=10)
+            self.search_frame.place(x=40, y=185, relwidth=0.5)
             return
         
         self.search_results = results
         for idx, (item_id, name) in enumerate(results[:10]):  # Show top 10
             btn = ctk.CTkButton(
                 self.search_frame,
-                text=f"{name} (ID: {item_id})",
-                command=lambda id=item_id: self.add_item_to_watchlist(id),
+                text=f"  {name}",
+                command=lambda id=item_id: self.handle_search_selection(id),
                 anchor="w",
-                height=30,
-                font=ctk.CTkFont(size=12)
+                height=35,
+                corner_radius=8,
+                fg_color="transparent",
+                hover_color="#3b3b3b",
+                font=ctk.CTkFont(family="Segoe UI", size=13)
             )
-            btn.pack(fill="x", padx=5, pady=2)
+            btn.pack(fill="x", padx=5, pady=1)
         
-        self.search_frame.pack(fill="x", padx=5, pady=5)
+        # Place search frame below search entry
+        self.search_frame.place(x=40, y=185, relwidth=0.5)
+        self.search_frame.lift()
     
-    def add_selected_item(self):
-        """Add item from search entry"""
-        query = self.search_entry.get()
-        item_id = self.item_db.get_id(query)
-        if item_id:
+    def handle_search_selection(self, item_id: int):
+        """Handle item selection from search results"""
+        if self.current_view == "watchlist":
             self.add_item_to_watchlist(item_id)
         else:
-            messagebox.showwarning("Not Found", f"Item '{query}' not found")
-    
+            self.add_item_to_portfolio(item_id)
+        
+        # Clear search after selection
+        self.search_entry.delete(0, 'end')
+        if hasattr(self, 'search_frame') and self.search_frame.winfo_manager():
+            self.search_frame.place_forget()
+
     def add_item_to_watchlist(self, item_id: int):
         """Add item to watchlist"""
         if self.watchlist.add_item(item_id):
@@ -693,9 +856,49 @@ class OSRSPriceMonitorApp:
             self.refresh_watchlist()
             self.search_entry.delete(0, 'end')
             if hasattr(self, 'search_frame') and self.search_frame.winfo_manager():
-                self.search_frame.pack_forget()
+                self.search_frame.place_forget()
         else:
             messagebox.showinfo("Already Added", "Item is already in watchlist")
+
+    def add_item_to_portfolio(self, item_id: int):
+        """Show dialog to add item to portfolio"""
+        item_name = self.item_db.get_name(item_id)
+        
+        # Create a simple dialog
+        dialog = ctk.CTkToplevel(self.root)
+        dialog.title(f"Add to Portfolio: {item_name}")
+        dialog.geometry("300x250")
+        dialog.transient(self.root)
+        dialog.grab_set()
+        
+        ctk.CTkLabel(dialog, text=f"Adding {item_name}", font=ctk.CTkFont(weight="bold")).pack(pady=10)
+        
+        ctk.CTkLabel(dialog, text="Quantity:").pack()
+        qty_entry = ctk.CTkEntry(dialog)
+        qty_entry.pack(pady=5)
+        
+        ctk.CTkLabel(dialog, text="Buy Price (GP):").pack()
+        price_entry = ctk.CTkEntry(dialog)
+        price_entry.pack(pady=5)
+        
+        def save():
+            try:
+                qty = int(qty_entry.get())
+                price = int(price_entry.get())
+                if qty <= 0 or price < 0:
+                    raise ValueError
+                
+                self.portfolio.add_item(item_id, qty, price)
+                self.status_var.set(f"Added {qty}x {item_name} to portfolio")
+                self.refresh_portfolio()
+                self.search_entry.delete(0, 'end')
+                if hasattr(self, 'search_frame') and self.search_frame.winfo_manager():
+                    self.search_frame.pack_forget()
+                dialog.destroy()
+            except ValueError:
+                messagebox.showerror("Invalid Input", "Please enter valid positive numbers")
+        
+        ctk.CTkButton(dialog, text="Add to Portfolio", command=save).pack(pady=20)
     
     def refresh_watchlist(self):
         """Refresh the watchlist table"""
@@ -703,11 +906,35 @@ class OSRSPriceMonitorApp:
         for item in self.tree.get_children():
             self.tree.delete(item)
         
-        # Add items
+        # Add items with placeholders first
         for item_id in self.watchlist.watchlist:
             item_name = self.item_db.get_name(item_id)
             self.tree.insert('', 'end', values=(item_name, '-', '-', '-', '-', '-', '-', 'No data'), tags=(str(item_id),))
+        
+        # Then update with cached data if available
+        self.update_display()
     
+    def refresh_portfolio(self):
+        """Refresh the portfolio table"""
+        # Clear existing items
+        for item in self.tree.get_children():
+            self.tree.delete(item)
+        
+        # Add items with placeholders first
+        for item_id_str, data in self.portfolio.portfolio.items():
+            item_id = int(item_id_str)
+            item_name = self.item_db.get_name(item_id)
+            qty = data['quantity']
+            buy_price = data['buy_price']
+            
+            self.tree.insert('', 'end', values=(item_name, f"{qty:,}", f"{buy_price:,}", '-', '-', '-', '-'), tags=(str(item_id),))
+        
+        # Then update with cached data if available
+        self.update_display()
+        
+        # Trigger a price check to fill in the data if it's been a while
+        self.check_prices_now()
+
     def show_price_chart(self, event):
         """Show price history chart for selected item"""
         selection = self.tree.selection()
@@ -884,9 +1111,14 @@ class OSRSPriceMonitorApp:
             menu.wm_overrideredirect(True)
             menu.geometry(f"+{event.x_root}+{event.y_root}")
             
+            if self.current_view == "watchlist":
+                remove_text = "Remove from Watchlist"
+            else:
+                remove_text = "Remove from Portfolio"
+                
             remove_btn = ctk.CTkButton(
                 menu,
-                text="Remove from Watchlist",
+                text=remove_text,
                 command=lambda: self.remove_selected_item(item, menu)
             )
             remove_btn.pack(padx=5, pady=5)
@@ -904,9 +1136,13 @@ class OSRSPriceMonitorApp:
         tags = self.tree.item(tree_item)['tags']
         if tags:
             item_id = int(tags[0])
-            self.watchlist.remove_item(item_id)
+            if self.current_view == "watchlist":
+                self.watchlist.remove_item(item_id)
+                self.status_var.set(f"Removed {item_name} from watchlist")
+            else:
+                self.portfolio.remove_item(item_id)
+                self.status_var.set(f"Removed {item_name} from portfolio")
             self.tree.delete(tree_item)
-            self.status_var.set(f"Removed {item_name} from watchlist")
         
         menu.destroy()
     
@@ -1032,6 +1268,63 @@ class OSRSPriceMonitorApp:
         """Check prices immediately"""
         threading.Thread(target=self.check_prices, daemon=True).start()
     
+    def update_display(self, trigger_alerts=False):
+        """Update the table display using cached data"""
+        if not self.last_price_data:
+            return []
+            
+        alerts = []
+        all_item_ids = set(self.watchlist.watchlist) | {int(id) for id in self.portfolio.portfolio.keys()}
+        
+        for item_id in all_item_ids:
+            item_id_str = str(item_id)
+            item_name = self.item_db.get_name(item_id)
+            
+            if item_id_str not in self.last_price_data:
+                continue
+            
+            item_data = self.last_price_data[item_id_str]
+            current_price = item_data.get('high') or item_data.get('low')
+            
+            if current_price is None:
+                continue
+            
+            # Handle Watchlist Update
+            if item_id in self.watchlist.watchlist:
+                stats = self.monitor.calculate_statistics(item_id)
+                if stats is None or len(self.monitor.price_history.get(item_id, [])) < 2:
+                    self.update_tree_item(item_id, item_name, current_price, "-", "-", "-", "-", "-", "Collecting data...")
+                else:
+                    avg_price = f"{stats['mean']:,.0f}"
+                    std_dev = f"{stats['std_dev']:,.0f}"
+                    volatility_pct = f"{(stats['std_dev'] / stats['mean']) * 100:.1f}%" if stats['mean'] > 0 else "N/A"
+                    dev_str = f"{stats['current_deviation']:.2f}σ"
+                    change_pct = ((current_price - stats['mean']) / stats['mean']) * 100 if stats['mean'] > 0 else 0
+                    change_str = f"{change_pct:+.1f}%"
+                    
+                    deviation = stats['current_deviation']
+                    if abs(deviation) >= self.threshold:
+                        status = "⚠️ ALERT!"
+                        if trigger_alerts:
+                            alerts.append({'item_name': item_name, 'deviation': deviation, 'current_price': current_price, 'avg_price': stats['mean']})
+                    else:
+                        status = "Normal"
+                    
+                    self.update_tree_item(item_id, item_name, current_price, avg_price, std_dev, volatility_pct, dev_str, change_str, status)
+
+            # Handle Portfolio Update
+            if item_id_str in self.portfolio.portfolio:
+                p_data = self.portfolio.portfolio[item_id_str]
+                qty = p_data['quantity']
+                buy_price = p_data['buy_price']
+                total_value = qty * current_price
+                profit_loss = total_value - (qty * buy_price)
+                pct_change = ((current_price - buy_price) / buy_price * 100) if buy_price > 0 else 0
+                
+                self.update_portfolio_tree_item(item_id, item_name, qty, buy_price, current_price, total_value, profit_loss, pct_change)
+        
+        return alerts
+
     def check_prices(self):
         """Fetch prices and update display"""
         self.status_var.set("Checking prices...")
@@ -1041,89 +1334,22 @@ class OSRSPriceMonitorApp:
             self.status_var.set("Error fetching prices")
             return
         
-        alerts = []
+        self.last_price_data = price_data
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         
-        for item_id in self.watchlist.watchlist:
+        # Update history for all items first
+        all_item_ids = set(self.watchlist.watchlist) | {int(id) for id in self.portfolio.portfolio.keys()}
+        for item_id in all_item_ids:
             item_id_str = str(item_id)
-            
-            # Get item name first
-            item_name = self.item_db.get_name(item_id)
-            
-            if item_id_str not in price_data:
-                continue
-            
-            item_data = price_data[item_id_str]
-            
-            # Get current price (prefer high price, fall back to low)
-            current_price = item_data.get('high')
-            if current_price is None:
-                current_price = item_data.get('low')
-            
-            if current_price is None:
-                continue
-            
-            # Update history
-            self.monitor.update_price_history(item_id, current_price)
-            self.price_history.add_price(item_id, current_price)
-            
-            # Calculate statistics
-            stats = self.monitor.calculate_statistics(item_id)
-            
-            # Format values - show current price even if no stats yet
-            if stats is None or len(self.monitor.price_history.get(item_id, [])) < 2:
-                # Not enough data for statistics yet, just show current price
-                avg_price = "-"
-                std_dev = "-"
-                volatility_pct = "-"
-                dev_str = "-"
-                change_str = "-"
-                status = "Collecting data..."
-                
-                # Update tree with current price
-                self.update_tree_item(item_id, item_name, current_price, avg_price, 
-                                     std_dev, volatility_pct, dev_str, change_str, status)
-                continue
-            
-            # Have enough data for statistics
-            avg_price = f"{stats['mean']:,.0f}"
-            std_dev = f"{stats['std_dev']:,.0f}"
-            
-            # Calculate volatility as percentage of average price
-            if stats['mean'] > 0:
-                volatility_pct = f"{(stats['std_dev'] / stats['mean']) * 100:.1f}%"
-            else:
-                volatility_pct = "N/A"
-            
-            dev_str = f"{stats['current_deviation']:.2f}σ"
-            # Have enough data for statistics
-            avg_price = f"{stats['mean']:,.0f}"
-            std_dev = f"{stats['std_dev']:,.0f}"
-            dev_str = f"{stats['current_deviation']:.2f}σ"
-            
-            # Calculate change percentage
-            if stats['mean'] > 0:
-                change_pct = ((current_price - stats['mean']) / stats['mean']) * 100
-                change_str = f"{change_pct:+.1f}%"
-            else:
-                change_str = "N/A"
-            
-            # Determine status and check for alerts
-            deviation = stats['current_deviation']
-            if abs(deviation) >= self.threshold:
-                status = "⚠️ ALERT!"
-                alerts.append({
-                    'item_name': item_name,
-                    'deviation': deviation,
-                    'current_price': current_price,
-                    'avg_price': stats['mean']
-                })
-            else:
-                status = "Normal"
-            
-            # Update tree
-            self.update_tree_item(item_id, item_name, current_price, avg_price, 
-                                 std_dev, volatility_pct, dev_str, change_str, status)
+            if item_id_str in price_data:
+                item_data = price_data[item_id_str]
+                current_price = item_data.get('high') or item_data.get('low')
+                if current_price is not None:
+                    self.monitor.update_price_history(item_id, current_price)
+                    self.price_history.add_price(item_id, current_price)
+        
+        # Update UI and check for alerts
+        alerts = self.update_display(trigger_alerts=True)
         
         # Show alerts
         if alerts:
@@ -1132,24 +1358,53 @@ class OSRSPriceMonitorApp:
         self.status_var.set(f"Last updated: {timestamp}")
     
     def update_tree_item(self, item_id, name, price, avg, std_dev, volatility_pct, deviation, change, status):
-        """Update or add item in tree"""
+        """Update or add item in watchlist tree"""
+        if self.current_view != "watchlist":
+            return
+            
         # Find existing item
         for item in self.tree.get_children():
             tags = self.tree.item(item)['tags']
             if tags and int(tags[0]) == item_id:
-                # Update existing
                 self.tree.item(item, values=(name, f"{price:,}", avg, std_dev, volatility_pct, deviation, change, status))
-                
-                # Color code based on status
                 if "ALERT" in status:
                     self.tree.item(item, tags=(str(item_id), 'alert'))
                 else:
                     self.tree.item(item, tags=(str(item_id),))
                 return
         
-        # Add new item
         self.tree.insert('', 'end', values=(name, f"{price:,}", avg, std_dev, volatility_pct, deviation, change, status),
                         tags=(str(item_id),))
+
+    def update_portfolio_tree_item(self, item_id, name, qty, buy_price, current_price, total_value, profit_loss, pct_change):
+        """Update or add item in portfolio tree"""
+        if self.current_view != "portfolio":
+            return
+            
+        # Find existing item
+        for item in self.tree.get_children():
+            tags = self.tree.item(item)['tags']
+            if tags and int(tags[0]) == item_id:
+                self.tree.item(item, values=(
+                    name,
+                    f"{qty:,}",
+                    f"{buy_price:,}",
+                    f"{current_price:,}",
+                    f"{total_value:,}",
+                    f"{profit_loss:+,}",
+                    f"{pct_change:+.1f}%"
+                ))
+                return
+        
+        self.tree.insert('', 'end', values=(
+            name,
+            f"{qty:,}",
+            f"{buy_price:,}",
+            f"{current_price:,}",
+            f"{total_value:,}",
+            f"{profit_loss:+,}",
+            f"{pct_change:+.1f}%"
+        ), tags=(str(item_id),))
     
     def show_alerts(self, alerts):
         """Show alert notifications"""
